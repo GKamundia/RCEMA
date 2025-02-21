@@ -62,13 +62,13 @@ def get_chat_response(messages, context: str) -> str:
         f"Context:\n{context}\n"
     )
     # Prepend the system prompt as a message and combine with the conversation history.
-    messages_with_context = [{"role": "user", "content": system_prompt}, *messages]
+    messages_with_context = [{"role": "system", "content": system_prompt}, *messages]
     # Combine messages into a single prompt string.
     combined_prompt = "\n".join(
-        [f"{msg['role'].capitalize()}: {msg['content']}" for msg in messages_with_context]
-    )
+        [f"{msg['role'].capitalize()}: {msg['content']}" for msg in messages_with_context] 
+    ) + "\nAssistant:"
     # Call invoke with the combined prompt.
-    response = llm.invoke(input=combined_prompt, temperature=0.7)
+    response = llm.invoke(input=combined_prompt, temperature=0.7, max_new_tokens=200, stop=["\nUser:", "\nAssistant:"])
     return response
 
 # --------------------------------------------------------------
