@@ -53,24 +53,16 @@ def get_context(query: str, table, num_results: int = 3) -> str:
 def get_chat_response(messages, context: str) -> str:
     """
     Get a chat completion response from the Hugging Face endpoint.
-<<<<<<< HEAD
     This version constructs the prompt by prepending system instructions
     (which are not added to the displayed conversation history) to the
     conversation history.
     """
     system_prompt = (
         "You are an assistant for a company known as CEMA (Center for Epidemiological Modelling and Analysis) called 'RCEMA' that answers questions based solely on the provided context. "
-=======
-    This version combines all messages into a single string and passes it as the `input` parameter.
-    """
-    system_prompt = (
-        "You are a helpful assistant that answers questions based solely on the provided context. "
->>>>>>> 3bdb3ff439340ab2bee3a25aab7a2655d44208f2
         "Use only the information from the context to answer questions. If you're unsure or the context "
         "doesn't contain the relevant information, say so.\n\n"
         f"Context:\n{context}\n"
     )
-<<<<<<< HEAD
     # Prepend the system prompt as a system message
     messages_with_context = [{"role": "system", "content": system_prompt}] + messages
     # Combine messages into a single prompt string, ending with "Assistant:"
@@ -80,26 +72,11 @@ def get_chat_response(messages, context: str) -> str:
     # Call invoke with the combined prompt.
     response = llm.invoke(input=combined_prompt, temperature=0.7, stop = ["\nUser:", "\nAssistant:"])
     return response.strip()
-=======
-    # Prepend the system prompt as a message and combine with the conversation history.
-    messages_with_context = [{"role": "system", "content": system_prompt}, *messages]
-    # Combine messages into a single prompt string.
-    combined_prompt = "\n".join(
-        [f"{msg['role'].capitalize()}: {msg['content']}" for msg in messages_with_context] 
-    ) + "\nAssistant:"
-    # Call invoke with the combined prompt.
-    response = llm.invoke(input=combined_prompt, temperature=0.7, max_new_tokens=200, stop=["\nUser:", "\nAssistant:"])
-    return response
->>>>>>> 3bdb3ff439340ab2bee3a25aab7a2655d44208f2
 
 # --------------------------------------------------------------
 # Streamlit Chatbot UI
 # --------------------------------------------------------------
-<<<<<<< HEAD
 st.title("📚 RCEMA")
-=======
-st.title("📚 Document Q&A")
->>>>>>> 3bdb3ff439340ab2bee3a25aab7a2655d44208f2
 
 # Initialize chat history in session state.
 if "messages" not in st.session_state:
