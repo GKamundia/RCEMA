@@ -53,28 +53,30 @@ def get_context(query: str, table, num_results: int = 3) -> str:
 def get_chat_response(messages, context: str) -> str:
     """
     Get a chat completion response from the Hugging Face endpoint.
-    This version combines all messages into a single string and passes it as the `input` parameter.
+    This version constructs the prompt by prepending system instructions
+    (which are not added to the displayed conversation history) to the
+    conversation history.
     """
     system_prompt = (
-        "You are a helpful assistant that answers questions based solely on the provided context. "
+        "You are an assistant for a company known as CEMA (Center for Epidemiological Modelling and Analysis) called 'RCEMA' that answers questions based solely on the provided context. "
         "Use only the information from the context to answer questions. If you're unsure or the context "
         "doesn't contain the relevant information, say so.\n\n"
         f"Context:\n{context}\n"
     )
-    # Prepend the system prompt as a message and combine with the conversation history.
-    messages_with_context = [{"role": "user", "content": system_prompt}, *messages]
-    # Combine messages into a single prompt string.
+    # Prepend the system prompt as a system message
+    messages_with_context = [{"role": "system", "content": system_prompt}] + messages
+    # Combine messages into a single prompt string, ending with "Assistant:"
     combined_prompt = "\n".join(
         [f"{msg['role'].capitalize()}: {msg['content']}" for msg in messages_with_context]
-    )
+    ) + "\nAssistant:"
     # Call invoke with the combined prompt.
-    response = llm.invoke(input=combined_prompt, temperature=0.7)
-    return response
+    response = llm.invoke(input=combined_prompt, temperature=0.7, stop = ["\nUser:", "\nAssistant:"])
+    return response.strip()
 
 # --------------------------------------------------------------
 # Streamlit Chatbot UI
 # --------------------------------------------------------------
-st.title("📚 Document Q&A")
+st.title("📚 RCEMA")
 
 # Initialize chat history in session state.
 if "messages" not in st.session_state:
