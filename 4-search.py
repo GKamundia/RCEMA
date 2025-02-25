@@ -19,5 +19,7 @@ table = db.open_table("docling")
 # Search the table
 # --------------------------------------------------------------
 
-result = table.search(query="departmentsd involved").limit(5)
+result = table.search(query="malnutrition").limit(5)
 result.to_pandas()
+
+

@@ -58,7 +58,7 @@ def get_chat_response(messages, context: str) -> str:
     conversation history.
     """
     system_prompt = (
-        "You are an assistant for a company known as CEMA (Center for Epidemiological Modelling and Analysis) called 'RCEMA' that answers questions based solely on the provided context. "
+        "You are an assistant called 'RCEMA' and you are here to help a company known as CEMA (Center for Epidemiological Modelling and Analysis) that answers questions based solely on the provided context. "
         "Use only the information from the context to answer questions. If you're unsure or the context "
         "doesn't contain the relevant information, say so.\n\n"
         f"Context:\n{context}\n"
