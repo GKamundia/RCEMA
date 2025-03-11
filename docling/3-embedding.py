@@ -17,15 +17,14 @@ MAX_TOKENS = 256  # Maximum sequence length for the chosen model
 # --------------------------------------------------------------
 # Extract the data
 # --------------------------------------------------------------
+pdf_files = [
+    "C:/Users/Anarchy/Documents/Data_Science/CEMA/RCEMA/docling/Protocol on Alarm Fatigue May_26_2024.pdf", # 145 chunks
+    "C:/Users/Anarchy/Documents/Data_Science/CEMA/RCEMA/docling/Kenya DHS.pdf"  # Update this path
+]
+
+all_chunks = []
 converter = DocumentConverter()
-# Replace with the correct path to your PDF or document.
-result = converter.convert("C:/Users/Anarchy/Documents/Data_Science/CEMA/RCEMA/docling/Protocol on Alarm Fatigue May_26_2024.pdf")
-
-document = result.document
-markdown_output = document.export_to_markdown()
-print(markdown_output)
-
-
+    
 # --------------------------------------------------------------
 # Apply hybrid chunking
 # --------------------------------------------------------------
@@ -36,9 +35,17 @@ chunker = HybridChunker(
     split_long_sentences=True,  # Ensure long sentences are split
 )
 
-chunk_iter = chunker.chunk(dl_doc=result.document)
-chunks = list(chunk_iter)
-print(f"Number of chunks: {len(chunks)}")
+for pdf_file in pdf_files:
+    result = converter.convert(pdf_file)
+    document = result.document
+    
+    # Apply hybrid chunking
+    chunk_iter = chunker.chunk(dl_doc=document)
+    chunks = list(chunk_iter)
+    print(f"Number of chunks for {pdf_file}: {len(chunks)}")
+    all_chunks.extend(chunks)
+
+print(f"Total chunks: {len(all_chunks)}")
 
 
 # --------------------------------------------------------------
@@ -55,6 +62,7 @@ class ChunkMetadata(LanceModel):
     Fields must be ordered alphabetically as required by Pydantic.
     """
     filename: str | None
+    is_table: bool  # New field to flag table content
     page_numbers: List[int] | None
     title: str | None
 
@@ -74,6 +82,7 @@ processed_chunks = [
         "text": chunk.text,
         "metadata": {
             "filename": chunk.meta.origin.filename,
+            "is_table": any(item.type == "table" for item in chunk.meta.doc_items),  # Detect table content
             "page_numbers": [
                 page_no
                 for page_no in sorted(
@@ -87,7 +96,7 @@ processed_chunks = [
             "title": chunk.meta.headings[0] if chunk.meta.headings else None,
         },
     }
-    for chunk in chunks
+    for chunk in all_chunks
 ]
 
 # --------------------------------------------------------------

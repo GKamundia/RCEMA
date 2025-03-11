@@ -1,4 +1,6 @@
 import os
+import io
+import pandas as pd
 import streamlit as st
 import lancedb
 from dotenv import load_dotenv
@@ -31,7 +33,8 @@ def get_context(query: str, table, num_results: int = 3) -> str:
     Search the LanceDB table for relevant context.
     Returns concatenated text with source information.
     """
-    results = table.search(query).limit(num_results).to_pandas()
+    # Prioritize table-containing chunks in search results
+    results = table.search(query).where("is_table = true").limit(num_results).to_pandas()
     contexts = []
     for _, row in results.iterrows():
         filename = row["metadata"]["filename"]
@@ -58,7 +61,7 @@ def get_chat_response(messages, context: str) -> str:
     conversation history.
     """
     system_prompt = (
-        "You are an assistant for a company known as CEMA (Center for Epidemiological Modelling and Analysis) called 'RCEMA' that answers questions based solely on the provided context. "
+        "You are an assistant called 'RCEMA' and you are here to help a company known as CEMA (Center for Epidemiological Modelling and Analysis) that answers questions based solely on the provided context. "
         "Use only the information from the context to answer questions. If you're unsure or the context "
         "doesn't contain the relevant information, say so.\n\n"
         f"Context:\n{context}\n"
@@ -142,7 +145,9 @@ if prompt := st.chat_input("Ask a question about the document"):
                     <details>
                         <summary>{source}</summary>
                         <div class="metadata">Section: {title}</div>
-                        <div style="margin-top: 8px;">{text}</div>
+                        <div style="margin-top: 8px;">
+                            {pd.read_csv(io.StringIO(text.strip("`")), sep="|", skiprows=[1]).to_html(index=False, classes="dataframe") if "|" in text else text}
+                        </div>
                     </details>
                 </div>
                 """,
