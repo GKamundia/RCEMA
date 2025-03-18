@@ -10,7 +10,8 @@ class HybridTokenizer:
         self.text_tokenizer = AutoTokenizer.from_pretrained(text_model)
         self.table_tokenizer = TapasTokenizer.from_pretrained(table_model)
         self._vocab_size = len(self.text_tokenizer)
-        self.max_length = 512
+        # Set max length per model constraints
+        self.max_length = 512  # Both models have 512 token limit
 
     def tokenize_text(self, text: str) -> list:
         """Tokenize regular text content"""

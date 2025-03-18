@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import lancedb
 import pydantic
 from docling.chunking import HybridChunker
@@ -16,7 +16,7 @@ load_dotenv()
 
 # Initialize components
 tokenizer = HybridTokenizer()
-MAX_TOKENS = 1024  # Increased for table preservation
+MAX_TOKENS = 512  # Adjust to match the model's limitations 
 
 # Enhanced table detection function
 def extract_tables_from_markdown(text: str) -> List[Dict[str, Any]]:

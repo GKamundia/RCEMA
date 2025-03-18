@@ -1,7 +1,11 @@
 {
 	"folders": [
 		{
+<<<<<<< HEAD
+			"path": "."
+=======
 			"path": ".."
+>>>>>>> fc064cf7087c7a30ef05ec09dd0a06d183b4833a
 		}
 	],
 	"settings": {}
