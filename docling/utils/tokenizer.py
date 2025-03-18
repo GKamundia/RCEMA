@@ -1,13 +1,15 @@
 from typing import Dict, List, Tuple
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer, PreTrainedTokenizerBase, TapasTokenizer
+
 
 class HuggingFaceTokenizerWrapper(PreTrainedTokenizerBase):
     """
-    Minimal wrapper using Hugging Face's AutoTokenizer for local embeddings.
-    Default model is "sentence-transformers/all-MiniLM-L6-v2" with max_length 256.
+    Handles both text and table tokenization with dual modes
     """
     
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2", max_length: int = 256, **kwargs):
+    def __init__(self,
+                 text_model: str = "sentence-transformers/all-mpnet-base-v2",
+                 table_model: str = "google/tapas-base"):
         """
         Initialize the tokenizer.
         
@@ -15,9 +17,10 @@ class HuggingFaceTokenizerWrapper(PreTrainedTokenizerBase):
             model_name: The Hugging Face model to use for tokenization.
             max_length: Maximum sequence length.
         """
-        super().__init__(model_max_length=max_length, **kwargs)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self._vocab_size = self.tokenizer.vocab_size
+        self.text_tokenizer = AutoTokenizer.from_pretrained(text_model)
+        self.table_tokenizer = TapasTokenizer.from_pretrained(table_model)
+        self.max_text_length = 512
+        self.max_table_length = 512
 
     def tokenize(self, text: str, **kwargs) -> List[str]:
         """Tokenize the input text."""

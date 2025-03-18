@@ -1,111 +1,121 @@
-from typing import List
+from typing import List, Optional
 import lancedb
+import pydantic
 from docling.chunking import HybridChunker
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter,PdfFormatOption, InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
+from docling.datamodel.base_models import InputFormat
 from dotenv import load_dotenv
+import pyarrow as pa
 from lancedb.embeddings import get_registry
 from lancedb.pydantic import LanceModel, Vector
 from utils.tokenizer import HuggingFaceTokenizerWrapper
 
-#Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
-# No need to initialize an OpenAI client since we are using the Hugging Face tokenizer locally.
-tokenizer = HuggingFaceTokenizerWrapper()  # Load our custom Hugging Face tokenizer
-MAX_TOKENS = 256  # Maximum sequence length for the chosen model
+# Initialize components with table support
+tokenizer = HuggingFaceTokenizerWrapper()
+MAX_TOKENS = 512  # Increased to preserve table structures
+
+# Enhanced PDF processing configuration
+def create_converter():
+    """Create document converter with table extraction settings"""
+    pipeline_options = PdfPipelineOptions(
+        do_table_structure=True,
+        table_structure_options={
+            "mode": TableFormerMode.ACCURATE,
+            "do_cell_matching": True
+        }
+    )
+    return DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+        }
+    )
 
 # --------------------------------------------------------------
-# Extract the data
+# Process PDF files
 # --------------------------------------------------------------
 pdf_files = [
-    "C:/Users/Anarchy/Documents/Data_Science/CEMA/RCEMA/docling/Protocol on Alarm Fatigue May_26_2024.pdf", # 145 chunks
-    "C:/Users/Anarchy/Documents/Data_Science/CEMA/RCEMA/docling/Kenya DHS.pdf"  # Update this path
+    "C:/Users/Anarchy/Documents/Data_Science/CEMA/RCEMA/docling/Protocol on Alarm Fatigue May_26_2024.pdf",
 ]
 
 all_chunks = []
-converter = DocumentConverter()
-    
-# --------------------------------------------------------------
-# Apply hybrid chunking
-# --------------------------------------------------------------
-chunker = HybridChunker(
-    tokenizer=tokenizer,
-    max_tokens=MAX_TOKENS,
-    merge_peers=True,
-    split_long_sentences=True,  # Ensure long sentences are split
-)
+converter = create_converter()
 
 for pdf_file in pdf_files:
     result = converter.convert(pdf_file)
     document = result.document
     
-    # Apply hybrid chunking
-    chunk_iter = chunker.chunk(dl_doc=document)
-    chunks = list(chunk_iter)
-    print(f"Number of chunks for {pdf_file}: {len(chunks)}")
+    # Verify table extraction
+    markdown_output = document.export_to_markdown()
+    print(f"Extracted content from {pdf_file}:\n{markdown_output[:500]}...")  # Show first 500 chars
+    
+    # Chunk with table preservation
+    chunker = HybridChunker(
+        tokenizer=tokenizer,
+        max_tokens=MAX_TOKENS,
+        merge_peers=False,  # Prevent merging across table boundaries
+        split_long_sentences=False  # Keep table structures intact
+    )
+    
+    chunks = list(chunker.chunk(document))
     all_chunks.extend(chunks)
+    print(f"Added {len(chunks)} chunks from {pdf_file}")
 
-print(f"Total chunks: {len(all_chunks)}")
-
+print(f"Total chunks processed: {len(all_chunks)}")
 
 # --------------------------------------------------------------
-# Create a LanceDB database and table
+# LanceDB Setup with Table Metadata and BERT Embeddings
 # --------------------------------------------------------------
 db = lancedb.connect("data/lancedb")
+# Get embedding function and dimensions
+embedding_func = get_registry().get("huggingface").create(name="bert-base-uncased") 
+vector_dim = embedding_func.ndims()  # Get dimensions as integer
 
-# Get the Hugging Face embedding function instead of the OpenAI one
-func = get_registry().get("huggingface").create(name="sentence-transformers/all-MiniLM-L6-v2")
+class TableMetadata(pydantic.BaseModel):
+    has_table: bool
+    table_count: int
+    columns: List[str] = pydantic.Field(default_factory=list)
 
-# Define a simplified metadata schema
 class ChunkMetadata(LanceModel):
-    """
-    Fields must be ordered alphabetically as required by Pydantic.
-    """
-    filename: str | None
-    is_table: bool  # New field to flag table content
-    page_numbers: List[int] | None
-    title: str | None
+    filename: str
+    page_numbers: Optional[List[int]] = pydantic.Field(default_factory=list)
+    title: Optional[str] = None
+    tables: TableMetadata
 
-# Define the main schema for our chunks
 class Chunks(LanceModel):
-    text: str = func.SourceField()
-    vector: Vector(func.ndims()) = func.VectorField()  # type: ignore
+    text: str = embedding_func.SourceField()
+    vector: Vector(vector_dim) = embedding_func.VectorField() # type: ignore
     metadata: ChunkMetadata
 
-table = db.create_table("docling", schema=Chunks, mode="overwrite")
+table = db.create_table("docling_tables", schema=Chunks, mode="overwrite")
 
 # --------------------------------------------------------------
-# Prepare the chunks for the table
+# Process and Store Chunks
 # --------------------------------------------------------------
-processed_chunks = [
-    {
-        "text": chunk.text,
-        "metadata": {
-            "filename": chunk.meta.origin.filename,
-            "is_table": any(item.type == "table" for item in chunk.meta.doc_items),  # Detect table content
-            "page_numbers": [
-                page_no
-                for page_no in sorted(
-                    set(
-                        prov.page_no
-                        for item in chunk.meta.doc_items
-                        for prov in item.prov
-                    )
-                )
-            ] or None,
-            "title": chunk.meta.headings[0] if chunk.meta.headings else None,
-        },
+processed_chunks = []
+for chunk in all_chunks:
+    # Detect tables in chunk text
+    table_lines = [line for line in chunk.text.split('\n') if line.startswith('|')]
+    has_table = len(table_lines) > 2  # At least header separator and one row
+    
+    metadata = {
+        "filename": chunk.meta.origin.filename,
+        "page_numbers": list(set(p.page_no for item in chunk.meta.doc_items for p in item.prov)),
+        "title": chunk.meta.headings[0] if chunk.meta.headings else None,
+        "tables": {
+            "has_table": has_table,
+            "table_count": chunk.text.count('\n|') // 3,  # Approximate table count
+            "columns": table_lines[0].split('|')[1:-1] if has_table else []
+        }
     }
-    for chunk in all_chunks
-]
+    
+    processed_chunks.append({
+        "text": chunk.text,
+        "metadata": metadata
+    })
 
-# --------------------------------------------------------------
-# Add the chunks to the table (automatically embeds the text)
-# --------------------------------------------------------------
 table.add(processed_chunks)
-
-# --------------------------------------------------------------
-# Load the table and inspect results
-# --------------------------------------------------------------
-print(table.to_pandas())
-print(table.count_rows())
+print(f"Database populated with {table.count_rows()} entries")

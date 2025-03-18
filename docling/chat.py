@@ -1,7 +1,29 @@
 import os
-import io
 import pandas as pd
 import streamlit as st
+import lancedb
+from dotenv import load_dotenv
+from langchain_huggingface import HuggingFaceEndpoint
+import lancedb
+import pandas as pd
+
+def init_db():
+    db = lancedb.connect(r"C:\Users\Anarchy\Documents\Data_Science\CEMA\RCEMA\docling\data\lancedb")
+    return db.open_table("docling_tables")
+
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to", ["Chat", "Database Explorer"])
+
+if page == "Database Explorer":
+    st.header("📊 Database Contents")
+    table = init_db()
+    df = table.to_pandas()
+    
+    # Process metadata columns
+    df['filename'] = df.metadata.apply(lambda x: x['filename'])
+    df['page_numbers'] = df.metadata.apply(lambda x: x['page_numbers'])
+    df['has_table'] = df.metadata.apply(lambda x: x['tables']['has_table'])
+    df['columns'] = df.metadata.apply(lambda x: x['tables']['columns'])
 import lancedb
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEndpoint
@@ -25,8 +47,8 @@ def init_db():
     """
     Initialize and return a LanceDB table object.
     """
-    db = lancedb.connect("data/lancedb")
-    return db.open_table("docling")
+    db = lancedb.connect(r"C:\Users\Anarchy\Documents\Data_Science\CEMA\RCEMA\docling\data\lancedb")
+    return db.open_table("docling_tables")
 
 def get_context(query: str, table, num_results: int = 3) -> str:
     """
@@ -34,24 +56,46 @@ def get_context(query: str, table, num_results: int = 3) -> str:
     Returns concatenated text with source information.
     """
     # Prioritize table-containing chunks in search results
-    results = table.search(query).where("is_table = true").limit(num_results).to_pandas()
+    results = table.search(query).limit(num_results).to_pandas()
     contexts = []
     for _, row in results.iterrows():
-        filename = row["metadata"]["filename"]
-        page_numbers = row["metadata"]["page_numbers"]
-        title = row["metadata"]["title"]
-        source_parts = []
-        if filename:
-            source_parts.append(filename)
-        if page_numbers is not None:
-            page_numbers_list = list(page_numbers)
-            if len(page_numbers_list) > 0:
-                source_parts.append(f"p. {', '.join(str(p) for p in page_numbers_list)}")
-        source = f"\nSource: {' - '.join(source_parts)}"
-        if title:
-            source += f"\nTitle: {title}"
-        contexts.append(f"{row['text']}{source}")
-    return "\n\n".join(contexts)
+        text = row["text"]
+        meta = row["metadata"]
+        
+        # Format source information
+        source = f"**Source:** {meta['filename']}"
+        if meta["page_numbers"]:
+            source += f" | **Pages:** {', '.join(map(str, meta['page_numbers']))}"
+        if meta["title"]:
+            source += f" | **Section:** {meta['title']}"
+        
+        # Add table metadata
+        if meta["tables"]["has_table"]:
+            source += f" | **Contains:** {meta['tables']['table_count']} table(s)"
+            source += f" | **Columns:** {', '.join(meta['tables']['columns'])}"
+        
+        contexts.append(f"{text}\n\n{source}")
+    
+    return "\n\n---\n\n".join(contexts)
+
+def format_response(text: str) -> str:
+    """Format tables in response"""
+    in_table = False
+    formatted = []
+    for line in text.split('\n'):
+        if line.startswith('|'):
+            if not in_table:
+                formatted.append("```markdown")
+                in_table = True
+            formatted.append(line)
+        else:
+            if in_table:
+                formatted.append("```")
+                in_table = False
+            formatted.append(line)
+    if in_table:
+        formatted.append("```")
+    return '\n'.join(formatted)
 
 def get_chat_response(messages, context: str) -> str:
     """
@@ -64,6 +108,10 @@ def get_chat_response(messages, context: str) -> str:
         "You are an assistant called 'RCEMA' and you are here to help a company known as CEMA (Center for Epidemiological Modelling and Analysis) that answers questions based solely on the provided context. "
         "Use only the information from the context to answer questions. If you're unsure or the context "
         "doesn't contain the relevant information, say so.\n\n"
+        "When presenting tables:"
+        "1. Always preserve markdown table formatting\n"
+        "2. Explain table contents clearly\n"
+        "3. Reference source information\n\n"
         f"Context:\n{context}\n"
     )
     # Prepend the system prompt as a system message
@@ -73,89 +121,61 @@ def get_chat_response(messages, context: str) -> str:
         [f"{msg['role'].capitalize()}: {msg['content']}" for msg in messages_with_context]
     ) + "\nAssistant:"
     # Call invoke with the combined prompt.
-    response = llm.invoke(input=combined_prompt, temperature=0.7, stop = ["\nUser:", "\nAssistant:"])
-    return response.strip()
+    response = llm.invoke(
+        input=combined_prompt, 
+        temperature=0.7, 
+        stop = ["\nUser:", "```"]) #Prevents table cuts
+    return format_response(response)
 
 # --------------------------------------------------------------
 # Streamlit Chatbot UI
 # --------------------------------------------------------------
 st.title("📚 RCEMA")
 
-# Initialize chat history in session state.
+# Add custom CSS for table styling
+st.markdown("""
+<style>
+div[data-testid="stMarkdownContainer"] table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+}
+div[data-testid="stMarkdownContainer"] th {
+    background-color: #f0f2f6;
+    font-weight: 600;
+}
+div[data-testid="stMarkdownContainer"] td, th {
+    padding: 8px;
+    border: 1px solid #ddd;
+}
+</style>
+""", unsafe_allow_html=True)
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Initialize the database connection.
 table = init_db()
 
-# Display existing chat messages.
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        st.markdown(message["content"], unsafe_allow_html=True)
 
-# Chat input area.
-if prompt := st.chat_input("Ask a question about the document"):
-    # Display user's message.
+if prompt := st.chat_input("Ask about document tables"):
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     
-    # Retrieve relevant context from the document.
-    with st.status("Searching document...", expanded=False):
+    with st.status("Analyzing documents..."):
         context = get_context(prompt, table)
-        st.markdown(
-            """
-            <style>
-            .search-result {
-                margin: 10px 0;
-                padding: 10px;
-                border-radius: 4px;
-                background-color: #f0f2f6;
-            }
-            .search-result summary {
-                cursor: pointer;
-                color: #0f52ba;
-                font-weight: 500;
-            }
-            .search-result summary:hover {
-                color: #1e90ff;
-            }
-            .metadata {
-                font-size: 0.9em;
-                color: #666;
-                font-style: italic;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.write("Found relevant sections:")
-        for chunk in context.split("\n\n"):
-            parts = chunk.split("\n")
-            text = parts[0]
-            metadata = {
-                line.split(": ")[0]: line.split(": ")[1]
-                for line in parts[1:] if ": " in line
-            }
-            source = metadata.get("Source", "Unknown source")
-            title = metadata.get("Title", "Untitled section")
-            st.markdown(
-                f"""
-                <div class="search-result">
-                    <details>
-                        <summary>{source}</summary>
-                        <div class="metadata">Section: {title}</div>
-                        <div style="margin-top: 8px;">
-                            {pd.read_csv(io.StringIO(text.strip("`")), sep="|", skiprows=[1]).to_html(index=False, classes="dataframe") if "|" in text else text}
-                        </div>
-                    </details>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        st.write("Relevant tables found:")
+        
+        # Display raw table previews
+        for chunk in context.split("\n\n---\n\n"):
+            text_part = chunk.split('\n\n')[0]
+            if '|' in text_part:
+                st.markdown(f"**Extracted Table Preview:**\n```markdown\n{text_part}\n```")
     
-    # Get and display the assistant's response.
     with st.chat_message("assistant"):
         response = get_chat_response(st.session_state.messages, context)
-        st.markdown(response)
+        st.markdown(response, unsafe_allow_html=True)
     st.session_state.messages.append({"role": "assistant", "content": response})
