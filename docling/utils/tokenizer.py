@@ -1,59 +1,68 @@
-from typing import Dict, List, Tuple
-from transformers import AutoTokenizer, PreTrainedTokenizerBase, TapasTokenizer
+from typing import Dict, List, Optional
+from transformers import AutoTokenizer, TapasTokenizer
 
-
-class HuggingFaceTokenizerWrapper(PreTrainedTokenizerBase):
-    """
-    Handles both text and table tokenization with dual modes
-    """
+class HybridTokenizer:
+    """Enhanced tokenizer with specialized table handling capabilities"""
     
-    def __init__(self,
-                 text_model: str = "sentence-transformers/all-mpnet-base-v2",
+    def __init__(self, 
+                 text_model: str = "sentence-transformers/all-mpnet-base-v2", 
                  table_model: str = "google/tapas-base"):
-        """
-        Initialize the tokenizer.
-        
-        Args:
-            model_name: The Hugging Face model to use for tokenization.
-            max_length: Maximum sequence length.
-        """
         self.text_tokenizer = AutoTokenizer.from_pretrained(text_model)
         self.table_tokenizer = TapasTokenizer.from_pretrained(table_model)
-        self.max_text_length = 512
-        self.max_table_length = 512
+        self._vocab_size = len(self.text_tokenizer)
+        # Set max length per model constraints
+        self.max_length = 512  # Both models have 512 token limit
 
-    def tokenize(self, text: str, **kwargs) -> List[str]:
-        """Tokenize the input text."""
-        tokens = self.tokenizer.tokenize(text, **kwargs)
-        return tokens
+    def tokenize_text(self, text: str) -> list:
+        """Tokenize regular text content"""
+        return self.text_tokenizer.tokenize(text)
 
-    def _tokenize(self, text: str) -> List[str]:
-        return self.tokenize(text)
+    def tokenize_table(self, table_markdown: str) -> dict:
+        """Convert markdown table to TAPAS-compatible format and tokenize"""
+        # Parse markdown table into a structure TAPAS can process
+        try:
+            # Simple conversion of markdown table to TAPAS input format
+            rows = [row.strip() for row in table_markdown.split('\n') if row.strip().startswith('|')]
+            if len(rows) < 3:  # Need header, separator, and at least one row
+                return self.text_tokenizer(table_markdown, return_tensors="pt")
+                
+            # Extract headers and data
+            headers = [h.strip() for h in rows[0].split('|')[1:-1]]
+            data = []
+            for row in rows[2:]:  # Skip separator row
+                cells = [cell.strip() for cell in row.split('|')[1:-1]]
+                if cells:
+                    data.append(cells)
+                    
+            # Create TAPAS input
+            return self.table_tokenizer(
+                table=data,
+                queries=[""],  # Empty query placeholder
+                column_names=headers,
+                padding="max_length",
+                max_length=self.max_length,
+                return_tensors="pt"
+            )
+        except Exception:
+            # Fall back to text tokenization if table parsing fails
+            return self.text_tokenizer(table_markdown, return_tensors="pt")
 
-    def encode(self, text: str, **kwargs) -> List[int]:
-        """
-        Encode the input text into a list of token IDs.
-        We set add_special_tokens=False so that chunking counts only the raw tokens.
-        """
-        return self.tokenizer.encode(text, add_special_tokens=False, truncation=True, max_length=self.model_max_length, **kwargs)
+    def encode_text(self, text: str, **kwargs) -> list:
+        """Encode text into token IDs"""
+        return self.text_tokenizer.encode(text, **kwargs)
 
-    def _convert_token_to_id(self, token: str) -> int:
-        return self.tokenizer.convert_tokens_to_ids(token)
+    def encode_table(self, table_markdown: str, **kwargs) -> dict:
+        """Encode table into TAPAS-compatible format"""
+        return self.tokenize_table(table_markdown)
 
-    def _convert_id_to_token(self, index: int) -> str:
-        return self.tokenizer.convert_ids_to_tokens(index)
-
-    def get_vocab(self) -> Dict[str, int]:
-        return self.tokenizer.get_vocab()
+    def get_combined_vocab(self) -> dict:
+        """Merge vocabularies from both tokenizers"""
+        return {**self.text_tokenizer.get_vocab(), **self.table_tokenizer.get_vocab()}
 
     @property
-    def vocab_size(self) -> int:
-        return self._vocab_size
+    def text_vocab_size(self) -> int:
+        return self.text_tokenizer.vocab_size
 
-    def save_vocabulary(self, *args, **kwargs) -> Tuple[str]:
-        return self.tokenizer.save_vocabulary(*args, **kwargs)
-
-    @classmethod
-    def from_pretrained(cls, *args, **kwargs):
-        """Class method to match Hugging Face's interface."""
-        return cls(*args, **kwargs)
+    @property
+    def table_vocab_size(self) -> int:
+        return self.table_tokenizer.vocab_size
