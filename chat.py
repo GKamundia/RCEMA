@@ -1,156 +1,292 @@
 import os
+import pandas as pd
 import streamlit as st
 import lancedb
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEndpoint
+from transformers import TapasTokenizer, TapasForQuestionAnswering
+import io
+import re
+import numpy as np
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
 
-# Retrieve your Hugging Face API token from environment variables.
+# Retrieve your Hugging Face API token from environment variables
 HF_TOKEN = os.getenv("HF_TOKEN")
-# Set the generation model ID (this example uses a Mistralai model)
+# Set the generation model ID
 GEN_MODEL_ID = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 
-# Initialize the Hugging Face endpoint for chat completions.
+# Initialize the Hugging Face endpoint for chat completions
 llm = HuggingFaceEndpoint(
     repo_id=GEN_MODEL_ID,
     huggingfacehub_api_token=HF_TOKEN,
 )
 
+# Set up TAPAS model for table-specific question answering
+@st.cache_resource
+def get_table_qa_model():
+    tokenizer = TapasTokenizer.from_pretrained("google/tapas-base-finetuned-wtq")
+    model = TapasForQuestionAnswering.from_pretrained("google/tapas-base-finetuned-wtq")
+    return model, tokenizer
+
+# Helper function to convert markdown table to pandas DataFrame
+def markdown_to_dataframe(markdown_table):
+    """Convert a markdown table to pandas DataFrame"""
+    lines = [line.strip() for line in markdown_table.split('\n') if line.strip().startswith('|')]
+    if len(lines) < 3:
+        return None
+    
+    # Extract headers
+    headers = [h.strip() for h in lines[0].split('|')[1:-1]]
+    
+    # Create rows
+    rows = []
+    for line in lines[2:]:  # Skip separator line
+        cells = [cell.strip() for cell in line.split('|')[1:-1]]
+        if len(cells) == len(headers):
+            rows.append(cells)
+    
+    # Create DataFrame
+    return pd.DataFrame(rows, columns=headers)
+
+# Function to analyze table with TAPAS
+def answer_from_table(table_markdown, question):
+    """Extract answer from table using TAPAS model"""
+    model, tokenizer = get_table_qa_model()
+    
+    # Convert markdown to DataFrame
+    df = markdown_to_dataframe(table_markdown)
+    if df is None:
+        return {"answer": None, "confidence": 0}
+    
+    # Clean and convert dataframe to string format
+    queries = [question]
+    
+    try:
+        # Convert DataFrame to TAPAS input format
+        inputs = tokenizer(table=df, queries=queries, padding="max_length", return_tensors="pt")
+        outputs = model(**inputs)
+        
+        # Get predicted answer
+        predicted_answer_coordinates = outputs.logits.detach().numpy()
+        answers = tokenizer.convert_logits_to_answers(
+            inputs=inputs,
+            logits=outputs.logits.detach().numpy()
+        )
+        
+        confidence = float(np.max(outputs.logits.softmax(dim=1).detach().numpy()))
+        
+        return {
+            "answer": answers[0],
+            "confidence": confidence
+        }
+    except Exception as e:
+        print(f"TAPAS error: {e}")
+        return {"answer": None, "confidence": 0}
+
+# Database connection
 @st.cache_resource
 def init_db():
-    """
-    Initialize and return a LanceDB table object.
-    """
-    db = lancedb.connect("data/lancedb")
-    return db.open_table("docling")
+    """Initialize and return a LanceDB table object."""
+    db = lancedb.connect(r"C:\Users\Anarchy\Documents\Data_Science\CEMA\RCEMA\docling\data\lancedb")
+    return db.open_table("docling_tables")
 
-def get_context(query: str, table, num_results: int = 3) -> str:
+# Detect if a query is likely asking for numerical information
+def is_numerical_query(query):
+    """Check if the query is likely asking for numerical information"""
+    patterns = [
+        r'how many', r'number of', r'count of', r'total', r'sum of', 
+        r'quantity', r'amount', r'figure', r'statistic', r'percentage',
+        r'ratio', r'proportion'
+    ]
+    return any(re.search(pattern, query.lower()) for pattern in patterns)
+
+def get_context(query: str, table, num_results: int = 3) -> dict:
     """
     Search the LanceDB table for relevant context.
-    Returns concatenated text with source information.
+    Returns dict with contexts and tables separately.
     """
-    results = table.search(query).limit(num_results).to_pandas()
+    # Prioritize table-containing chunks for numerical queries
+    if is_numerical_query(query):
+        table_results = table.search(query).where("metadata.tables.has_table == true").limit(num_results).to_pandas()
+        if len(table_results) > 0:
+            num_results = max(1, num_results - len(table_results))
+        else:
+            num_results = num_results
+        text_results = table.search(query).where("metadata.tables.has_table == false").limit(num_results).to_pandas()
+        results = pd.concat([table_results, text_results])
+    else:
+        # Standard search for non-numerical queries
+        results = table.search(query).limit(num_results).to_pandas()
+    
     contexts = []
+    tables = []
+    
     for _, row in results.iterrows():
-        filename = row["metadata"]["filename"]
-        page_numbers = row["metadata"]["page_numbers"]
-        title = row["metadata"]["title"]
-        source_parts = []
-        if filename:
-            source_parts.append(filename)
-        if page_numbers is not None:
-            page_numbers_list = list(page_numbers)
-            if len(page_numbers_list) > 0:
-                source_parts.append(f"p. {', '.join(str(p) for p in page_numbers_list)}")
-        source = f"\nSource: {' - '.join(source_parts)}"
-        if title:
-            source += f"\nTitle: {title}"
-        contexts.append(f"{row['text']}{source}")
-    return "\n\n".join(contexts)
+        text = row["text"]
+        meta = row["metadata"]
+        
+        # Format source information
+        source = f"**Source:** {meta['filename']}"
+        if meta["page_numbers"]:
+            source += f" | **Pages:** {', '.join(map(str, meta['page_numbers']))}"
+        if meta["title"]:
+            source += f" | **Section:** {meta['title']}"
+        
+        # Is this primarily a table?
+        is_table_chunk = meta["tables"]["has_table"] and meta["tables"]["table_count"] > 0
+        
+        if is_table_chunk:
+            # Extract table content
+            table_lines = [line for line in text.split('\n') if line.strip().startswith('|')]
+            if len(table_lines) >= 3:  # Valid table needs header, separator and data rows
+                table_text = '\n'.join(table_lines)
+                table_info = {
+                    "text": table_text,
+                    "source": source,
+                    "title": meta["tables"].get("title") or meta["title"] or "Table",
+                    "columns": meta["tables"]["columns"]
+                }
+                tables.append(table_info)
+        
+        contexts.append(f"{text}\n\n{source}")
+    
+    return {
+        "contexts": "\n\n---\n\n".join(contexts),
+        "tables": tables
+    }
 
-def get_chat_response(messages, context: str) -> str:
+def format_response(text: str) -> str:
+    """Format tables in response"""
+    in_table = False
+    formatted = []
+    for line in text.split('\n'):
+        if line.startswith('|'):
+            if not in_table:
+                formatted.append("```markdown")
+                in_table = True
+            formatted.append(line)
+        else:
+            if in_table:
+                formatted.append("```")
+                in_table = False
+            formatted.append(line)
+    if in_table:
+        formatted.append("```")
+    return '\n'.join(formatted)
+
+def get_chat_response(messages, context_data: dict) -> str:
     """
-    Get a chat completion response from the Hugging Face endpoint.
-    This version constructs the prompt by prepending system instructions
-    (which are not added to the displayed conversation history) to the
-    conversation history.
+    Get a response using both TAPAS for tables and LLM for text.
     """
+    query = messages[-1]["content"]
+    
+    # Check if we have tables to analyze
+    tables = context_data.get("tables", [])
+    if tables and is_numerical_query(query):
+        # Process each table with TAPAS
+        best_answer = None
+        best_confidence = 0
+        best_table = None
+        
+        for table_data in tables:
+            table_text = table_data["text"]
+            answer_result = answer_from_table(table_text, query)
+            
+            if answer_result["answer"] and answer_result["confidence"] > best_confidence:
+                best_answer = answer_result["answer"]
+                best_confidence = answer_result["confidence"]
+                best_table = table_data
+        
+        if best_answer and best_confidence > 0.5:  # Confidence threshold
+            response = (
+                f"**Answer:** {best_answer}\n\n"
+                f"**Source:** {best_table['title']}\n\n"
+                f"```markdown\n{best_table['text']}\n```"
+            )
+            return response
+    
+    # Fall back to text-based LLM
     system_prompt = (
         "You are an assistant called 'RCEMA' and you are here to help a company known as CEMA (Center for Epidemiological Modelling and Analysis) that answers questions based solely on the provided context. "
         "Use only the information from the context to answer questions. If you're unsure or the context "
         "doesn't contain the relevant information, say so.\n\n"
-        f"Context:\n{context}\n"
+        "When presenting tables:"
+        "1. Always preserve markdown table formatting\n"
+        "2. Explain table contents clearly\n"
+        "3. Reference source information\n\n"
+        f"Context:\n{context_data['contexts']}\n"
     )
+    
     # Prepend the system prompt as a system message
     messages_with_context = [{"role": "system", "content": system_prompt}] + messages
+    
     # Combine messages into a single prompt string, ending with "Assistant:"
     combined_prompt = "\n".join(
         [f"{msg['role'].capitalize()}: {msg['content']}" for msg in messages_with_context]
     ) + "\nAssistant:"
-    # Call invoke with the combined prompt.
-    response = llm.invoke(input=combined_prompt, temperature=0.7, stop = ["\nUser:", "\nAssistant:"])
-    return response.strip()
+    
+    # Call invoke with the combined prompt
+    response = llm.invoke(
+        input=combined_prompt, 
+        temperature=0.7, 
+        stop=["\nUser:", "```"]
+    )
+    
+    return format_response(response)
 
 # --------------------------------------------------------------
 # Streamlit Chatbot UI
 # --------------------------------------------------------------
-st.title("📚 RCEMA")
+st.title("📊 RCEMA - Table Q&A System")
 
-# Initialize chat history in session state.
+# Add custom CSS for table styling
+st.markdown("""
+<style>
+div[data-testid="stMarkdownContainer"] table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+}
+div[data-testid="stMarkdownContainer"] th {
+    background-color: #f0f2f6;
+    font-weight: 600;
+}
+div[data-testid="stMarkdownContainer"] td, th {
+    padding: 8px;
+    border: 1px solid #ddd;
+}
+div[data-testid="stMarkdownContainer"] code {
+    white-space: pre-wrap !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Initialize the database connection.
 table = init_db()
 
-# Display existing chat messages.
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        st.markdown(message["content"], unsafe_allow_html=True)
 
-# Chat input area.
-if prompt := st.chat_input("Ask a question about the document"):
-    # Display user's message.
+if prompt := st.chat_input("Ask about document tables or content"):
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     
-    # Retrieve relevant context from the document.
-    with st.status("Searching document...", expanded=False):
-        context = get_context(prompt, table)
-        st.markdown(
-            """
-            <style>
-            .search-result {
-                margin: 10px 0;
-                padding: 10px;
-                border-radius: 4px;
-                background-color: #f0f2f6;
-            }
-            .search-result summary {
-                cursor: pointer;
-                color: #0f52ba;
-                font-weight: 500;
-            }
-            .search-result summary:hover {
-                color: #1e90ff;
-            }
-            .metadata {
-                font-size: 0.9em;
-                color: #666;
-                font-style: italic;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.write("Found relevant sections:")
-        for chunk in context.split("\n\n"):
-            parts = chunk.split("\n")
-            text = parts[0]
-            metadata = {
-                line.split(": ")[0]: line.split(": ")[1]
-                for line in parts[1:] if ": " in line
-            }
-            source = metadata.get("Source", "Unknown source")
-            title = metadata.get("Title", "Untitled section")
-            st.markdown(
-                f"""
-                <div class="search-result">
-                    <details>
-                        <summary>{source}</summary>
-                        <div class="metadata">Section: {title}</div>
-                        <div style="margin-top: 8px;">{text}</div>
-                    </details>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    with st.status("Analyzing documents..."):
+        context_data = get_context(prompt, table)
+        
+        if context_data["tables"]:
+            st.write(f"Found {len(context_data['tables'])} relevant tables")
+            for table_data in context_data["tables"]:
+                with st.expander(f"{table_data['title']}"):
+                    st.markdown(f"```markdown\n{table_data['text']}\n```")
     
-    # Get and display the assistant's response.
     with st.chat_message("assistant"):
-        response = get_chat_response(st.session_state.messages, context)
-        st.markdown(response)
+        response = get_chat_response(st.session_state.messages, context_data)
+        st.markdown(response, unsafe_allow_html=True)
     st.session_state.messages.append({"role": "assistant", "content": response})

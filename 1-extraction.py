@@ -1,7 +1,21 @@
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, PdfFormatOption, InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
 from utils.sitemap import get_sitemap_urls
 
-converter = DocumentConverter()
+# Configure PDF processing with accurate table extraction
+pipeline_options = PdfPipelineOptions(
+    do_table_structure=True,
+    table_structure_options={
+        "mode": TableFormerMode.ACCURATE,
+        "table_output_format": "markdown",
+        "max_workers": 4,
+        "crop_padding": 10
+    },
+    layout_analysis_engine="rtdetr"
+)
+converter = DocumentConverter(
+    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+)
 # --------------------------------------------------------------
 # Basic PDF extraction
 # --------------------------------------------------------------
