@@ -1,7 +1,8 @@
 import os
 import pandas as pd
 import streamlit as st
-import lancedb
+import chromadb
+import json
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEndpoint
 from transformers import TapasTokenizer, TapasForQuestionAnswering
@@ -22,12 +23,12 @@ llm = HuggingFaceEndpoint(
     huggingfacehub_api_token=HF_TOKEN,
 )
 
-# Initialize database connection
+# Initialize database connection with ChromaDB
 @st.cache_resource
 def init_db():
-    """Initialize and return a LanceDB table object."""
-    db = lancedb.connect(r"C:\Users\Anarchy\Documents\Data_Science\CEMA\RCEMA\docling\data\lancedb")
-    return db.open_table("docling_tables")
+    """Initialize and return a ChromaDB collection object."""
+    client = chromadb.PersistentClient("data/chromadb")
+    return client.get_collection("docling_tables")
 
 # Set up TAPAS model for table-specific question answering
 @st.cache_resource
@@ -131,40 +132,53 @@ def answer_from_table(table_markdown, question):
         print(f"TAPAS error: {e}")
         return {"answer": None, "confidence": 0}
 
-def get_context(query: str, table, num_results: int = 3) -> dict:
+def get_context(query: str, collection, num_results: int = 3) -> dict:
     """
-    Search the LanceDB table for relevant context.
+    Search the ChromaDB collection for relevant context.
     Returns dict with contexts and tables separately.
     """
-    # Prioritize table-containing chunks for numerical queries
+    # Get results from ChromaDB - adjusted for ChromaDB's API
     if is_numerical_query(query):
-        table_results = table.search(query).where("metadata.tables.has_table == true").limit(num_results).to_pandas()
-        if len(table_results) > 0:
-            num_results = max(1, num_results - len(table_results))
-        else:
-            num_results = num_results
-        text_results = table.search(query).where("metadata.tables.has_table == false").limit(num_results).to_pandas()
-        results = pd.concat([table_results, text_results]) if not text_results.empty else table_results
+        # Try to get table results first
+        results = collection.query(
+            query_texts=[query],
+            n_results=num_results,
+            where={"tables": {"$contains": "\"has_table\": true"}}  # This works for JSON string search
+        )
+        
+        if not results["documents"][0]:  # If no tables found, get any results
+            results = collection.query(
+                query_texts=[query],
+                n_results=num_results
+            )
     else:
         # Standard search for non-numerical queries
-        results = table.search(query).limit(num_results).to_pandas()
+        results = collection.query(
+            query_texts=[query],
+            n_results=num_results
+        )
     
     contexts = []
     tables = []
     
-    for _, row in results.iterrows():
-        text = row["text"]
-        meta = row["metadata"]
+    # Process results - ChromaDB returns lists for each result type
+    for i, (doc, metadata_dict) in enumerate(zip(results["documents"][0], results["metadatas"][0])):
+        text = doc
+        meta = metadata_dict
+        
+        # Parse the tables JSON string into a dictionary
+        tables_meta = json.loads(meta["tables"])
         
         # Format source information
         source = f"**Source:** {meta['filename']}"
-        if meta["page_numbers"]:
-            source += f" | **Pages:** {', '.join(map(str, meta['page_numbers']))}"
+        page_numbers = json.loads(meta["page_numbers"]) if meta["page_numbers"] else []
+        if page_numbers:
+            source += f" | **Pages:** {', '.join(map(str, page_numbers))}"
         if meta["title"]:
             source += f" | **Section:** {meta['title']}"
         
         # Is this primarily a table?
-        is_table_chunk = meta["tables"]["has_table"] and meta["tables"]["table_count"] > 0
+        is_table_chunk = tables_meta["has_table"] and tables_meta["table_count"] > 0
         
         if is_table_chunk:
             # Extract table content
@@ -174,8 +188,8 @@ def get_context(query: str, table, num_results: int = 3) -> dict:
                 table_info = {
                     "text": table_text,
                     "source": source,
-                    "title": meta["tables"].get("title") or meta["title"] or "Table",
-                    "columns": meta["tables"]["columns"]
+                    "title": tables_meta.get("title") or meta["title"] or "Table",
+                    "columns": tables_meta["columns"]
                 }
                 tables.append(table_info)
         
@@ -295,7 +309,7 @@ div[data-testid="stMarkdownContainer"] code {
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-table = init_db()
+collection = init_db()
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -307,7 +321,7 @@ if prompt := st.chat_input("Ask about document tables or content"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     
     with st.status("Analyzing documents..."):
-        context_data = get_context(prompt, table)
+        context_data = get_context(prompt, collection)
         
         if context_data["tables"]:
             st.write(f"Found {len(context_data['tables'])} relevant tables")

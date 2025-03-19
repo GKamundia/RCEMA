@@ -1,15 +1,15 @@
 from typing import List, Optional, Dict, Any, Union
-import lancedb
-import pydantic
+import chromadb
+from chromadb.utils import embedding_functions
 from docling.chunking import HybridChunker
 from docling.document_converter import DocumentConverter, PdfFormatOption, InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
 from dotenv import load_dotenv
-from lancedb.embeddings import get_registry
-from lancedb.pydantic import LanceModel, Vector
 from utils.tokenizer import HybridTokenizer
 import re
 import pandas as pd
+import json
+import os
 
 # Load environment variables
 load_dotenv()
@@ -17,6 +17,9 @@ load_dotenv()
 # Initialize components
 tokenizer = HybridTokenizer()
 MAX_TOKENS = 512  # Adjust to match the model's limitations 
+
+# Load your HF token from .env file
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 # Enhanced table detection function
 def extract_tables_from_markdown(text: str) -> List[Dict[str, Any]]:
@@ -155,75 +158,100 @@ for pdf_file in pdf_files:
 
 print(f"Total chunks processed: {len(all_chunks)}")
 
-# LanceDB Setup with enhanced embedding model
-db = lancedb.connect("data/lancedb")
-embedding_func = get_registry().get("huggingface").create(
-    name="sentence-transformers/all-mpnet-base-v2"  # Better semantic understanding than BERT
-)
-vector_dim = embedding_func.ndims()
+# Install required packages
+# pip install sentence-transformers
 
-class TableMetadata(pydantic.BaseModel):
-    has_table: bool
-    table_count: int
-    columns: List[str] = pydantic.Field(default_factory=list)
-    title: str = ""
-    row_count: int = 0
-    has_numbers: bool = False
+# Replace the HuggingFace API embedding function with a local one
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
-class ChunkMetadata(LanceModel):
-    filename: str
-    page_numbers: Optional[List[int]] = pydantic.Field(default_factory=list)
-    title: Optional[str] = None
-    tables: TableMetadata
-
-class Chunks(LanceModel):
-    text: str = embedding_func.SourceField()
-    vector: Vector(vector_dim) = embedding_func.VectorField() # type: ignore
-    metadata: ChunkMetadata
-
-table = db.create_table("docling_tables", schema=Chunks, mode="overwrite")
-
-# Process and Store Chunks with enhanced metadata
-processed_chunks = []
-for chunk in all_chunks:
-    if chunk["is_table"]:
-        # Special handling for table chunks
-        metadata = {
-            "filename": chunk["origin"],
-            "page_numbers": chunk["page_numbers"],
-            "title": chunk["table_meta"].get("title", "Table"),
-            "tables": {
-                "has_table": True,
-                "table_count": 1,
-                "columns": chunk["table_meta"].get("columns", []),
-                "title": chunk["table_meta"].get("title", "Table"),
-                "row_count": chunk["table_meta"].get("row_count", 0),
-                "has_numbers": chunk["table_meta"].get("has_numbers", False)
-            }
-        }
-    else:
-        # Regular text chunks
-        table_lines = [line for line in chunk["text"].split('\n') if line.strip().startswith('|')]
-        has_table = len(table_lines) > 2
+# Create a local embedding function that doesn't require API calls
+class LocalSentenceTransformerEmbedding:
+    def __init__(self, model_name="all-MiniLM-L6-v2"):
+        self.model = SentenceTransformer(model_name)
+        self.model_name = model_name
         
-        metadata = {
-            "filename": chunk["origin"],
-            "page_numbers": chunk["page_numbers"],
-            "title": chunk["headings"][0] if chunk["headings"] else None,
-            "tables": {
-                "has_table": has_table,
-                "table_count": chunk["text"].count('\n|') // 3,
-                "columns": table_lines[0].split('|')[1:-1] if has_table else [],
-                "title": "",
-                "row_count": len(table_lines) - 2 if has_table else 0,
-                "has_numbers": False
-            }
-        }
-    
-    processed_chunks.append({
-        "text": chunk["text"],
-        "metadata": metadata
-    })
+    def __call__(self, input):
+        # Convert embeddings to list of lists
+        return self.model.encode(input, show_progress_bar=True).tolist()
 
-table.add(processed_chunks)
-print(f"Database populated with {table.count_rows()} entries")
+# Use the local embedding function instead of HuggingFace API
+embedding_function = LocalSentenceTransformerEmbedding(model_name="all-MiniLM-L6-v2")
+
+# Replace the ChromaDB collection creation code
+chroma_client = chromadb.PersistentClient("data/chromadb")
+
+# Delete collection if it exists (for clean restart)
+try:
+    chroma_client.delete_collection("docling_tables")
+except:
+    pass
+
+# Create a new collection with local embedding function
+collection = chroma_client.create_collection(
+    name="docling_tables",
+    embedding_function=embedding_function  # Local embedding function
+)
+
+# Prepare documents, metadatas and IDs for ChromaDB
+documents = []
+metadatas = []
+ids = []
+
+for i, chunk in enumerate(all_chunks):
+    documents.append(chunk["text"])
+    
+    # Create nested tables structure for metadata
+    tables_metadata = {
+        "has_table": chunk["is_table"],
+        "table_count": 1 if chunk["is_table"] else 0,
+        "columns": chunk["table_meta"].get("columns", []) if chunk["is_table"] else [],
+        "title": chunk["table_meta"].get("title", "") if chunk["is_table"] else "",
+        "row_count": chunk["table_meta"].get("row_count", 0) if chunk["is_table"] else 0,
+        "has_numbers": chunk["table_meta"].get("has_numbers", False) if chunk["is_table"] else False
+    }
+    
+    # ChromaDB requires all metadata values to be strings
+    metadata = {
+        "filename": str(chunk["origin"]),
+        "page_numbers": json.dumps(chunk["page_numbers"]),
+        "title": str(chunk["headings"][0] if chunk["headings"] else ""),
+        "tables": json.dumps(tables_metadata)
+    }
+    
+    metadatas.append(metadata)
+    ids.append(f"chunk_{i}")
+
+# Process documents in smaller batches to avoid timeouts
+BATCH_SIZE = 20  # Adjust this number as needed
+for i in range(0, len(documents), BATCH_SIZE):
+    batch_docs = documents[i:i+BATCH_SIZE]
+    batch_metadata = metadatas[i:i+BATCH_SIZE]
+    batch_ids = ids[i:i+BATCH_SIZE]
+    
+    print(f"Processing batch {i//BATCH_SIZE + 1}/{len(documents)//BATCH_SIZE + 1} ({len(batch_docs)} documents)")
+    
+    try:
+        collection.add(
+            documents=batch_docs,
+            metadatas=batch_metadata,
+            ids=batch_ids
+        )
+    except Exception as e:
+        print(f"Error processing batch {i//BATCH_SIZE + 1}: {e}")
+        # Continue with the next batch
+
+print(f"Database populated with {collection.count()} entries")
+
+# Test a simple search
+results = collection.query(
+    query_texts=["What is alarm fatigue?"],
+    n_results=3
+)
+
+print("\nSample search results:")
+for i, (doc, metadata) in enumerate(zip(results["documents"][0], results["metadatas"][0])):
+    print(f"\n--- Result {i+1} ---")
+    print(f"Text: {doc[:150]}..." if len(doc) > 150 else doc)
+    print(f"Metadata: {metadata}")
+    print(f"Is table: {'Yes' if json.loads(metadata['tables'])['has_table'] else 'No'}")
